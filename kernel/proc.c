@@ -85,6 +85,20 @@ allocpid() {
   return pid;
 }
 
+uint64 nproc(void) {
+  struct proc *p;
+  uint64 num = 0;
+  
+  for(p = proc; p < &proc[NPROC]; p++) {
+    acquire(&p->lock);
+    if(p->state != UNUSED) {
+      num++;
+    }
+    release(&p->lock);
+  }
+  return num;
+}
+
 // Look in the process table for an UNUSED proc.
 // If found, initialize state required to run in the kernel,
 // and return with p->lock held.
@@ -230,6 +244,8 @@ userinit(void)
 
   p->state = RUNNABLE;
 
+  p->trace_scall = 0;         // no trace
+
   release(&p->lock);
 }
 
@@ -294,6 +310,8 @@ fork(void)
   pid = np->pid;
 
   np->state = RUNNABLE;
+  
+  np->trace_scall = p->trace_scall;
 
   release(&np->lock);
 
