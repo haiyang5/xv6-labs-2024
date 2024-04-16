@@ -47,31 +47,33 @@ kvminit()
   kvmmap(TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
 }
 
-pagetable_t kvm_alloc() {
-  pagetable_t kpt = (pagetable_t) kalloc();
-  memset(kernel_pagetable, 0, PGSIZE);
+pagetable_t kpt_alloc() {
+  pagetable_t pagetable = uvmcreate();
+  if (pagetable == 0) return 0;
 
   // uart registers
-  kvmmap(UART0, UART0, PGSIZE, PTE_R | PTE_W);
+  kpt_map(pagetable, UART0, UART0, PGSIZE, PTE_R | PTE_W);
 
   // virtio mmio disk interface
-  kvmmap(VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W);
+  kpt_map(pagetable, VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W);
 
   // CLINT
-  kvmmap(CLINT, CLINT, 0x10000, PTE_R | PTE_W);
+  kpt_map(pagetable, CLINT, CLINT, 0x10000, PTE_R | PTE_W);
 
   // PLIC
-  kvmmap(PLIC, PLIC, 0x400000, PTE_R | PTE_W);
+  kpt_map(pagetable, PLIC, PLIC, 0x400000, PTE_R | PTE_W);
 
   // map kernel text executable and read-only.
-  kvmmap(KERNBASE, KERNBASE, (uint64)etext-KERNBASE, PTE_R | PTE_X);
+  kpt_map(pagetable, KERNBASE, KERNBASE, (uint64)etext-KERNBASE, PTE_R | PTE_X);
 
   // map kernel data and the physical RAM we'll make use of.
-  kvmmap((uint64)etext, (uint64)etext, PHYSTOP-(uint64)etext, PTE_R | PTE_W);
+  kpt_map(pagetable, (uint64)etext, (uint64)etext, PHYSTOP-(uint64)etext, PTE_R | PTE_W);
 
   // map the trampoline for trap entry/exit to
   // the highest virtual address in the kernel.
-  kvmmap(TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
+  kpt_map(pagetable, TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
+
+  return pagetable;
 }
 
 // Switch h/w page table register to the kernel's page table,
@@ -80,6 +82,13 @@ void
 kvminithart()
 {
   w_satp(MAKE_SATP(kernel_pagetable));
+  sfence_vma();
+}
+
+void
+kpt_inithart(pagetable_t pagetable)
+{
+  w_satp(MAKE_SATP(pagetable));
   sfence_vma();
 }
 
@@ -146,6 +155,27 @@ kvmmap(uint64 va, uint64 pa, uint64 sz, int perm)
 {
   if(mappages(kernel_pagetable, va, sz, pa, perm) != 0)
     panic("kvmmap");
+}
+void
+kpt_map(pagetable_t pagetable, uint64 va, uint64 pa, uint64 sz, int perm)
+{
+  if(mappages(pagetable, va, sz, pa, perm) != 0)
+    panic("kpt_map");
+}
+
+void kpt_copy(pagetable_t pagetable, uint64 va) {
+  pte_t *pte_k, *pte_u;
+
+  if(va >= MAXVA)
+    panic("kpt_copy:va");
+
+  pte_k = walk(kernel_pagetable, va, 0);
+  if(pte_k == 0)
+    panic("kpt_copy:walk");
+  pte_u = walk(pagetable, va, 1);
+  if(pte_u == 0)
+    panic("kpt_copy:walk");
+  *pte_u = *pte_k;
 }
 
 // translate a kernel virtual address to
@@ -218,6 +248,36 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
       kfree((void*)pa);
     }
     *pte = 0;
+  }
+}
+
+void
+kpt_unmap(pagetable_t pagetable, uint64 va, uint64 size, int do_free)
+{
+  uint64 a, last;
+  pte_t *pte;
+
+  a = PGROUNDDOWN(va);
+  last = PGROUNDDOWN(va + size - 1);
+  for(;;) {
+    if((pte = walk(pagetable, a, 0)) == 0)
+      panic("kpt_unmap: walk");
+    if((*pte & PTE_V) == 0 && a < CLINT) {
+      printf("va=%p\n", a);
+      printf("size=%p\n", size);
+      panic("kpt_unmap: not mapped");
+    }
+
+    if(PTE_FLAGS(*pte) == PTE_V)
+      panic("kpt_unmap: not a leaf");
+    if(do_free){
+      uint64 pa = PTE2PA(*pte);
+      kfree((void*)pa);
+    }
+    *pte = 0;
+    if(a == last)
+      break;
+    a += PGSIZE;
   }
 }
 
@@ -355,6 +415,18 @@ uvmfree(pagetable_t pagetable, uint64 sz)
   freewalk(pagetable);
 }
 
+void kpt_free(pagetable_t pagetable, uint64 usz) {
+  kpt_unmap(pagetable, UART0, PGSIZE, 0);
+  kpt_unmap(pagetable, VIRTIO0, PGSIZE, 0);
+  kpt_unmap(pagetable, CLINT, 0x10000, 0);
+  kpt_unmap(pagetable, PLIC, 0x400000, 0);
+  kpt_unmap(pagetable, KERNBASE, (uint64)etext-KERNBASE, 0);
+  kpt_unmap(pagetable, (uint64)etext, PHYSTOP-(uint64)etext, 0);
+  kpt_unmap(pagetable, TRAMPOLINE, PGSIZE, 0);
+  if (usz) kpt_unmap(pagetable, 0, usz, 0);
+  freewalk(pagetable);
+}
+
 // Given a parent process's page table, copy
 // its memory into a child's page table.
 // Copies both the page table and the
@@ -389,6 +461,29 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
  err:
   uvmunmap(new, 0, i / PGSIZE, 1);
   return -1;
+}
+
+//0xC000000
+void uvm_mapkpt(pagetable_t uvm, pagetable_t kpt, uint64 va_st, uint64 va_ed)
+{
+  pte_t *pte_u, *pte_k;
+  uint64 i;
+
+  for(i = PGROUNDUP(va_st); i < PGROUNDUP(va_ed); i += PGSIZE){
+    if ((pte_u = walk(uvm, i, 0)) == 0)
+      panic("uvm_mapkpt: src pte does not exist");
+    if((*pte_u & PTE_V) == 0)
+      continue;
+    if((pte_k = walk(kpt, i, 1)) == 0) {
+      panic("uvm_mapkpt: walk:1");
+    }
+    *pte_k = *pte_u & ~PTE_U;
+  }
+  if (va_ed < va_st) {
+    int npages = (PGROUNDUP(va_st) - PGROUNDUP(va_ed)) / PGSIZE;
+    uvmunmap(kpt, PGROUNDUP(va_ed), npages, 0); 
+  }
+
 }
 
 // mark a PTE invalid for user access.
@@ -435,23 +530,24 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 int
 copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 {
-  uint64 n, va0, pa0;
+  // uint64 n, va0, pa0;
 
-  while(len > 0){
-    va0 = PGROUNDDOWN(srcva);
-    pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
-      return -1;
-    n = PGSIZE - (srcva - va0);
-    if(n > len)
-      n = len;
-    memmove(dst, (void *)(pa0 + (srcva - va0)), n);
+  // while(len > 0){
+  //   va0 = PGROUNDDOWN(srcva);
+  //   pa0 = walkaddr(pagetable, va0);
+  //   if(pa0 == 0)
+  //     return -1;
+  //   n = PGSIZE - (srcva - va0);
+  //   if(n > len)
+  //     n = len;
+  //   memmove(dst, (void *)(pa0 + (srcva - va0)), n);
 
-    len -= n;
-    dst += n;
-    srcva = va0 + PGSIZE;
-  }
-  return 0;
+  //   len -= n;
+  //   dst += n;
+  //   srcva = va0 + PGSIZE;
+  // }
+  // return 0;
+  return copyin_new(pagetable, dst, srcva, len);
 }
 
 // Copy a null-terminated string from user to kernel.
@@ -461,38 +557,39 @@ copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 int
 copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
 {
-  uint64 n, va0, pa0;
-  int got_null = 0;
+  return copyinstr_new(pagetable, dst, srcva, max);
+  // uint64 n, va0, pa0;
+  // int got_null = 0;
 
-  while(got_null == 0 && max > 0){
-    va0 = PGROUNDDOWN(srcva);
-    pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
-      return -1;
-    n = PGSIZE - (srcva - va0);
-    if(n > max)
-      n = max;
+  // while(got_null == 0 && max > 0){
+  //   va0 = PGROUNDDOWN(srcva);
+  //   pa0 = walkaddr(pagetable, va0);
+  //   if(pa0 == 0)
+  //     return -1;
+  //   n = PGSIZE - (srcva - va0);
+  //   if(n > max)
+  //     n = max;
 
-    char *p = (char *) (pa0 + (srcva - va0));
-    while(n > 0){
-      if(*p == '\0'){
-        *dst = '\0';
-        got_null = 1;
-        break;
-      } else {
-        *dst = *p;
-      }
-      --n;
-      --max;
-      p++;
-      dst++;
-    }
+  //   char *p = (char *) (pa0 + (srcva - va0));
+  //   while(n > 0){
+  //     if(*p == '\0'){
+  //       *dst = '\0';
+  //       got_null = 1;
+  //       break;
+  //     } else {
+  //       *dst = *p;
+  //     }
+  //     --n;
+  //     --max;
+  //     p++;
+  //     dst++;
+  //   }
 
-    srcva = va0 + PGSIZE;
-  }
-  if(got_null){
-    return 0;
-  } else {
-    return -1;
-  }
+  //   srcva = va0 + PGSIZE;
+  // }
+  // if(got_null){
+  //   return 0;
+  // } else {
+  //   return -1;
+  // }
 }

@@ -41,7 +41,16 @@ procinit(void)
       kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
       p->kstack = va;
   }
-  kvminithart();
+  kvminithart();  //TLB cache
+}
+
+void proc_kpt_copy(pagetable_t pagetable) {
+  struct proc *p;
+
+  for(p = proc; p < &proc[NPROC]; p++) {
+    uint64 va = KSTACK((int) (p - proc));
+    kpt_copy(pagetable, va);
+  }
 }
 
 // Must be called with interrupts disabled,
@@ -120,6 +129,15 @@ found:
     release(&p->lock);
     return 0;
   }
+  
+  // An kernel page table.
+  p->kernel_pagetable = kpt_alloc();
+  if(p->kernel_pagetable == 0){
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+  proc_kpt_copy(p->kernel_pagetable);
 
   // Set up new context to start executing at forkret,
   // which returns to user space.
@@ -142,6 +160,9 @@ freeproc(struct proc *p)
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
+  if(p->kernel_pagetable)
+    proc_freekpt(p->kernel_pagetable, p->sz);
+  p->kernel_pagetable = 0;
   p->sz = 0;
   p->pid = 0;
   p->parent = 0;
@@ -195,6 +216,17 @@ proc_freepagetable(pagetable_t pagetable, uint64 sz)
   uvmfree(pagetable, sz);
 }
 
+void
+proc_freekpt(pagetable_t pagetable, uint64 usz)
+{
+  struct proc *p;
+  for(p = proc; p < &proc[NPROC]; p++) {
+    uint64 va = KSTACK((int) (p - proc));
+    kpt_unmap(pagetable, va, PGSIZE, 0);
+  }
+  kpt_free(pagetable, usz);
+}
+
 // a user program that calls exec("/init")
 // od -t xC initcode
 uchar initcode[] = {
@@ -220,6 +252,8 @@ userinit(void)
   // and data into it.
   uvminit(p->pagetable, initcode, sizeof(initcode));
   p->sz = PGSIZE;
+  uvm_mapkpt(p->pagetable, p->kernel_pagetable, 0, p->sz);//0xC000000
+  // printf("proc:%s, userinit:size=%p\n", p->name, p->sz);
 
   // prepare for the very first "return" from kernel to user.
   p->trapframe->epc = 0;      // user program counter
@@ -243,12 +277,17 @@ growproc(int n)
 
   sz = p->sz;
   if(n > 0){
+    if (PGROUNDUP(sz + n) >= PLIC){
+      return -1;
+    }
     if((sz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
       return -1;
     }
   } else if(n < 0){
     sz = uvmdealloc(p->pagetable, sz, sz + n);
   }
+  uvm_mapkpt(p->pagetable, p->kernel_pagetable, sz - n, sz);
+  // printf("proc:%s, growproc:size=%p\n", p->name, sz);
   p->sz = sz;
   return 0;
 }
@@ -274,6 +313,9 @@ fork(void)
     return -1;
   }
   np->sz = p->sz;
+
+  uvm_mapkpt(np->pagetable, np->kernel_pagetable, 0, np->sz);
+  // printf("proc:%s, fork:size=%p\n", p->name, p->sz);
 
   np->parent = p;
 
@@ -473,8 +515,10 @@ scheduler(void)
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
+        kpt_inithart(p->kernel_pagetable);
         swtch(&c->context, &p->context);
 
+        kvminithart();
         // Process is done running for now.
         // It should have changed its p->state before coming back.
         c->proc = 0;
