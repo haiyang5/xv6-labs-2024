@@ -75,6 +75,11 @@ sys_read(void)
 
   if(argfd(0, 0, &f) < 0 || argint(2, &n) < 0 || argaddr(1, &p) < 0)
     return -1;
+
+  if (uvmcheck(myproc()->pagetable, myproc()->sz, p, n) < 0) {
+    return -1;
+  }
+  
   return fileread(f, p, n);
 }
 
@@ -87,7 +92,11 @@ sys_write(void)
 
   if(argfd(0, 0, &f) < 0 || argint(2, &n) < 0 || argaddr(1, &p) < 0)
     return -1;
-
+    
+  if (uvmcheck(myproc()->pagetable, myproc()->sz, p, n) < 0) {
+    return -1;
+  }
+  
   return filewrite(f, p, n);
 }
 
@@ -464,6 +473,11 @@ sys_pipe(void)
 
   if(argaddr(0, &fdarray) < 0)
     return -1;
+
+  if (uvmcheck(myproc()->pagetable, myproc()->sz, fdarray, sizeof(int)*2) < 0) {
+    return -1;
+  }
+
   if(pipealloc(&rf, &wf) < 0)
     return -1;
   fd0 = -1;

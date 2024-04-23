@@ -181,9 +181,11 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
 
   for(a = va; a < va + npages*PGSIZE; a += PGSIZE){
     if((pte = walk(pagetable, a, 0)) == 0)
-      panic("uvmunmap: walk");
+      // panic("uvmunmap: walk");
+      continue;
     if((*pte & PTE_V) == 0)
-      panic("uvmunmap: not mapped");
+      continue;
+      // panic("uvmunmap: not mapped");
     if(PTE_FLAGS(*pte) == PTE_V)
       panic("uvmunmap: not a leaf");
     if(do_free){
@@ -193,6 +195,37 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
     *pte = 0;
   }
 }
+
+int uvmcheck(pagetable_t pagetable, uint64 psz, uint64 addr, uint64 n) {
+  
+  uint64 a;
+  pte_t *pte;
+  
+  if (addr + n > psz) {
+    return -1;
+  }
+
+  for(a = addr; a < addr + n; a += PGSIZE){
+    if((pte = walk(pagetable, a, 0)) == 0 || (*pte & PTE_V) == 0) {
+      void * mem = kalloc();
+      if(mem == 0){
+        printf("uvmcheck:no mem!\n");
+        return -1;
+      }
+      memset(mem, 0, PGSIZE);
+      if(mappages(pagetable, PGROUNDDOWN(a), PGSIZE, (uint64)mem, PTE_W|PTE_X|PTE_R|PTE_U) != 0){
+        kfree(mem);
+        printf("uvmcheck:no mem!\n");
+        return -1;
+      }
+    }
+    else if ((*pte & PTE_U) == 0) {
+      return -1;
+    }
+  }
+  return 0;
+}
+
 
 // create an empty user page table.
 // returns 0 if out of memory.
@@ -289,6 +322,35 @@ freewalk(pagetable_t pagetable)
   kfree((void*)pagetable);
 }
 
+void printwalk(pagetable_t pagetable, int n) {
+  // there are 2^9 = 512 PTEs in a page table.
+  for(int i = 0; i < 512; i++){
+    pte_t pte = pagetable[i];
+    if(pte & PTE_V){
+      if (n == 1) {
+        printf("..%d: pte %p pa %p\n", i, pte, PTE2PA(pte));
+      }
+      else if (n == 2) {
+        printf(".. ..%d: pte %p pa %p\n", i, pte, PTE2PA(pte));
+      }
+      else if (n == 3) {
+        printf(".. .. ..%d: pte %p pa %p\n", i, pte, PTE2PA(pte));
+      }
+      // this PTE points to a lower-level page table.
+      if (n < 3) {
+        uint64 child = PTE2PA(pte);
+        printwalk((pagetable_t)child, n + 1);
+      }
+    } 
+  }
+}
+
+
+void vmprint(pagetable_t pagetable) {
+  printf("page table %p\n", pagetable);
+  printwalk(pagetable, 1);
+}
+
 // Free user memory pages,
 // then free page-table pages.
 void
@@ -315,9 +377,11 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
-      panic("uvmcopy: pte should exist");
+      continue;
+      // panic("uvmcopy: pte should exist");
     if((*pte & PTE_V) == 0)
-      panic("uvmcopy: page not present");
+      continue;
+      // panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
     if((mem = kalloc()) == 0)
