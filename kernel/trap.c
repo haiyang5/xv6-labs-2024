@@ -65,6 +65,14 @@ usertrap(void)
     intr_on();
 
     syscall();
+  } else if(r_scause() == 15){
+    uint64 fault_va = r_stval();
+    if (fault_va > p->sz) {
+      p->killed = 1;
+    }
+    else if (check_fva(fault_va, p->pagetable) == -1) {
+      p->killed = 1;
+    }
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {

@@ -335,6 +335,76 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   return -1;
 }
 
+int
+uvmcopy_C(pagetable_t old, pagetable_t new, uint64 sz)
+{
+  pte_t *pte;
+  uint64 pa, i;
+
+  for(i = 0; i < sz; i += PGSIZE){
+    if((pte = walk(old, i, 0)) == 0)
+      panic("uvmcopy: pte should exist");
+    if((*pte & PTE_V) == 0)
+      panic("uvmcopy: page not present");
+    pa = PTE2PA(*pte);
+    if (*pte & PTE_W) {
+      *pte |= PTE_C;
+      *pte &= ~PTE_W;
+    }
+    if(mappages(new, i, PGSIZE, pa, PTE_FLAGS(*pte)) != 0) {
+      goto err;
+    }
+    quote(pa);
+  }
+  return 0;
+
+ err:
+  uvmunmap(new, 0, i / PGSIZE, 1);
+  return -1;
+}
+
+int
+check_cow(pte_t *pte) {
+  uint64 pa = PTE2PA(*pte);
+  uint8 count = get_pg_count(pa);
+  if (count <= 0) {
+    panic("check_cow count error\n");
+  }
+  else if (count == 1) {
+    *pte |= PTE_W;
+    *pte &= ~PTE_C;
+  }
+  else {
+    char *mem;
+    if((mem = kalloc()) == 0) {
+      printf("check_cow no mem\n");
+      set_pg_count(pa, count);
+      return -1;
+    }
+    memmove(mem, (char*)pa, PGSIZE);
+    uint flags = PTE_FLAGS(*pte);
+    flags &= ~PTE_C;
+    *pte = PA2PTE(mem) | flags | PTE_W;
+    --count;
+  }
+  set_pg_count(pa, count);
+  return 0;
+}
+
+int
+check_fva(uint64 fault_va, pagetable_t pagetable) {
+
+  pte_t *pte;
+  if((pte = walk(pagetable, fault_va, 0)) == 0 || (*pte & PTE_V) == 0) {
+    return -1;
+  }
+  if (*pte & PTE_C) {
+    return check_cow(pte);
+  }
+
+  return -1;
+}
+
 // mark a PTE invalid for user access.
 // used by exec for the user stack guard page.
 void
@@ -358,9 +428,17 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
-    pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
+    // pa0 = walkaddr(pagetable, va0);
+    if(va0 >= MAXVA)
       return -1;
+
+    pte_t *pte = walk(pagetable, va0, 0);
+    if(pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0)
+      return -1;
+    if (check_cow(pte) < 0)
+      return -1;
+    pa0 = PTE2PA(*pte);
+
     n = PGSIZE - (dstva - va0);
     if(n > len)
       n = len;
