@@ -25,14 +25,18 @@ now()
  return tv.tv_sec + tv.tv_usec / 1000000.0;
 }
 
+pthread_mutex_t lock[NBUCKET]; // declare a lock
+
 static void 
-insert(int key, int value, struct entry **p, struct entry *n)
+insert(int key, int value, struct entry **p, int i)
 {
   struct entry *e = malloc(sizeof(struct entry));
   e->key = key;
   e->value = value;
-  e->next = n;
+  pthread_mutex_lock(&lock[i]); // acquire lock每个散列桶加一个锁后有所加速，从3.4降低至3.2
+  e->next = *p;
   *p = e;
+  pthread_mutex_unlock(&lock[i]); // release lock
 }
 
 static 
@@ -51,7 +55,7 @@ void put(int key, int value)
     e->value = value;
   } else {
     // the new is new.
-    insert(key, value, &table[i], table[i]);
+    insert(key, value, &table[i], i);
   }
 }
 
@@ -113,6 +117,9 @@ main(int argc, char *argv[])
   assert(NKEYS % nthread == 0);
   for (int i = 0; i < NKEYS; i++) {
     keys[i] = random();
+  }
+  for(int i = 0; i < nthread; i++) {
+    pthread_mutex_init(&lock[i], NULL);
   }
 
   //

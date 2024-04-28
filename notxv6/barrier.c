@@ -31,6 +31,19 @@ barrier()
   // then increment bstate.round.
   //
   
+  pthread_mutex_lock(&bstate.barrier_mutex);
+  bstate.nthread += 1;
+  if (bstate.nthread < nthread) {
+    // 在cond上进入睡眠，释放锁mutex，在醒来时重新获取
+    pthread_cond_wait(&bstate.barrier_cond, &bstate.barrier_mutex);
+  }
+  else {
+    // 唤醒睡在cond的所有线程
+    bstate.nthread = 0;
+    bstate.round += 1;
+    pthread_cond_broadcast(&bstate.barrier_cond);
+  }
+  pthread_mutex_unlock(&bstate.barrier_mutex);
 }
 
 static void *
