@@ -65,6 +65,47 @@ usertrap(void)
     intr_on();
 
     syscall();
+  } else if(r_scause() == 13) {
+    uint64 va = r_stval();
+    char *mem = kalloc();
+    if(mem == 0){
+      printf("kalloc: no mem!\n");
+      p->killed = 1;
+    }
+    else {
+      struct vma *vma1;
+      for (vma1 = p->vma; vma1 - p->vma < 16; vma1++) {
+        if (vma1->v && vma1->addr <= va && va < vma1->addr + vma1->length) {
+          break;
+        }
+      }
+      if (vma1 - p->vma < 16) {
+        memset(mem, 0, PGSIZE);
+        uint rest = vma1->addr + vma1->length - PGROUNDDOWN(va);
+        vma1->perm |= PTE_U;
+        uint n = rest > PGSIZE ? PGSIZE : rest; 
+        // printf("pg va:%d-%p\n", vma1 - p->vma, va);
+        if(mmap_read(vma1, 0, (uint64)mem, va - vma1->addr + vma1->offset, n) < 0){
+          kfree(mem);
+          printf("%d-%d-%d-%d\n", vma1->addr, vma1->length, va, rest);
+          printf("trap mmap_read: error!\n");
+          p->killed = 1;
+          panic("\n");
+        }
+        
+        if(mmp_perm(p->pagetable, va, (uint64)mem, vma1->perm)) {
+          // printf("trap mmp_perm\n");
+          kfree(mem);
+          p->killed = 1;
+        }
+
+      }
+      else {
+        kfree(mem);
+        printf("vma: no vma match v:%d!\n", vma1->v);
+        p->killed = 1;
+      }
+    }
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {

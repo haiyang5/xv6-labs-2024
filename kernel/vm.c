@@ -156,6 +156,18 @@ mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
   return 0;
 }
 
+int
+mmp_perm(pagetable_t pagetable, uint64 va, uint64 pa, int perm)
+{
+  pte_t *pte;
+  if((pte = walk(pagetable, PGROUNDDOWN(va), 0)) == 0)
+    return -1;
+  if(!(*pte & PTE_V))
+    panic("mmp_perm: PTE_V");
+  *pte = PA2PTE(pa) | perm;
+  return 0;
+}
+
 // Remove npages of mappings starting from va. va must be
 // page-aligned. The mappings must exist.
 // Optionally free the physical memory.

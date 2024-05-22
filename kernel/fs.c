@@ -476,6 +476,20 @@ readi(struct inode *ip, int user_dst, uint64 dst, uint off, uint n)
   return tot;
 }
 
+int mmap_read(struct vma *vma1, int user_dst, uint64 dst, uint off, uint n) {
+  
+  ilock(vma1->f->ip);
+  // printf("mmap_read start:%p %p %d %d\n", user_dst, dst, off, n);
+  int r = readi(vma1->f->ip, user_dst, dst, off, n);
+  if (r <= 0) {
+    printf("mmap_read error:%d %d %d\n", r, n, off);
+    return -1;
+  }
+  iunlock(vma1->f->ip);
+
+  return 0;
+}
+
 // Write data to inode.
 // Caller must hold ip->lock.
 // If user_src==1, then src is a user virtual address;

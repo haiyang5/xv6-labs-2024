@@ -15,6 +15,8 @@
 #include "sleeplock.h"
 #include "file.h"
 #include "fcntl.h"
+#include "memlayout.h"
+
 
 // Fetch the nth word-sized system call argument as a file descriptor
 // and return both the descriptor and the corresponding struct file.
@@ -484,3 +486,172 @@ sys_pipe(void)
   }
   return 0;
 }
+
+uint64 sys_mmap(void) {
+  uint64 addr;
+  int length, prot, flags, fd, offset;
+  if(argaddr(0, &addr) < 0 || argint(1, &length) < 0 || argint(2, &prot) < 0 || argint(3, &flags) < 0 || argint(4, &fd) < 0 || argint(5, &offset) < 0)
+    return -1;
+
+  struct proc *p = myproc();
+
+  if (length <= 0 || p->ofile[fd] == 0) 
+    return -1;
+
+  int perm = 0;
+  perm |= PTE_V;
+  if (prot & PROT_READ)
+    perm |= PTE_R;
+  if (prot & PROT_WRITE)
+    perm |= PTE_W;
+  if (prot & PROT_EXEC)
+    perm |= PTE_X;
+
+  if ((flags & MAP_SHARED) && ((!p->ofile[fd]->readable && (prot & PROT_READ || prot & PROT_EXEC))
+   || (!p->ofile[fd]->writable && prot & PROT_WRITE))) {
+    return -1;
+  }
+
+
+  struct vma *vma1, *vma2;
+  uint64 ed = MMAPEND, up_length = PGROUNDDOWN(length);
+  for (vma1 = p->vma; vma1 - p->vma < 16; vma1++) {
+    if (vma1->v == 0) {
+      vma2 = vma1 + 1;
+      while (vma2 - p->vma < 16) {
+        if (vma2->v != 0) break;
+        vma2++;
+      }
+      if (vma2 - p->vma >= 16 || ed - PGROUNDUP(vma2->addr + vma2->length) >= up_length) {
+        vma1->addr = ed - up_length;
+        break;
+      }
+      else {
+        vma1 = vma2;
+        ed = vma1->addr;
+      }
+    }
+    else {
+      ed = vma1->addr;
+    }
+  }
+  // printf("mmap vma%d:%d~%d\n", vma1 - p->vma, vma1->addr, MMAPEND);
+  if (vma1 - p->vma >= 16) {
+    printf("mmap no vma\n");
+    return -1;
+  }
+
+
+
+  uint64 a;
+  for(a = vma1->addr; a < vma1->addr + length; a += PGSIZE) {
+    if(mappages(p->pagetable, a, PGSIZE, 0, perm) != 0){
+      int npages = (PGROUNDUP(a) - vma1->addr) / PGSIZE;
+      uvmunmap(p->pagetable, vma1->addr, npages, 0);
+      // printf("mmap mappages error\n");
+      return -1;
+    }
+  }
+  
+  vma1->v = 1;
+  vma1->length = length;
+  vma1->perm = perm;
+  vma1->flags = flags;
+  vma1->f = p->ofile[fd];
+  filedup(vma1->f);
+  vma1->offset = offset;
+
+  return vma1->addr;
+}
+
+
+int release_vma(struct vma *vma1, uint addr, int length, pagetable_t pagetable) {
+  uint64 a = PGROUNDDOWN(addr);
+  for (; a < addr + length; a += PGSIZE) {
+    uint64 pa0 = walkaddr(pagetable, a);
+    if (pa0 == 0) {
+      uvmunmap(pagetable, a, 1, 0);
+    }
+    else {
+      if (vma1->flags & MAP_SHARED) {
+        begin_op();
+        ilock(vma1->f->ip);
+        int r;
+        r = writei(vma1->f->ip, 1, a, a - vma1->addr + vma1->offset, PGSIZE);
+        iunlock(vma1->f->ip);
+        end_op();
+        if (r <= 0) {
+          printf("munmap writei error:%d-%p-%d\n", r, a, a - vma1->addr);
+          return -1;
+        }
+      }
+      uvmunmap(pagetable, a, 1, 1);
+    }
+  }
+
+  if (addr == vma1->addr) {
+    uint64 old_addr = vma1->addr;
+    vma1->addr = PGROUNDUP(addr + length);
+    vma1->offset = vma1->addr - old_addr;
+  }
+  vma1->length -= length;
+
+  if (vma1->length == 0) {
+    vma1->v = 0;
+    fileclose(vma1->f);
+    // printf("munmap fileclose：%d\n", length);
+  }
+
+
+  return 0;
+}
+
+
+uint64 sys_munmap(void) {
+  uint64 addr;
+  int length;
+  if(argaddr(0, &addr) < 0 || argint(1, &length) < 0)
+      return -1;
+
+  struct proc *p = myproc();
+
+  if (length <= 0) 
+    return -1;
+
+  struct vma *vma1;
+  for (vma1 = p->vma; vma1 - p->vma < 16; vma1++) {
+    if (vma1->v && vma1->addr <= addr && addr < vma1->addr + vma1->length) {
+      break;
+    }
+  }
+  if (vma1 - p->vma >= 16) {
+    printf("munmap no vma match\n");
+    return -1;
+  }
+  if (addr + length > vma1->addr + vma1->length) {
+    printf("munmap out range\n");
+    return -1;
+  }
+
+  if (release_vma(vma1, addr, length, p->pagetable) < 0) {
+    return -1;
+  }
+
+  return 0;
+}
+
+  // oldsz = p->sz;
+  // oldsz_up = PGROUNDUP(oldsz);
+  // newsz = oldsz + length;
+  // if (oldsz < oldsz_up && mmap_read(vma1, (uint64)oldsz, 0, 0, oldsz_up - oldsz) < 0) {
+  //   printf("mmap readi:error\n");
+  //   return -1;
+  // }
+  // for(a = oldsz_up; a < newsz; a += PGSIZE) {
+  //   if(mappages(p->pagetable, a, PGSIZE, 0, perm) != 0){
+  //     int npages = (PGROUNDUP(a) - oldsz_up) / PGSIZE;
+  //     uvmunmap(p->pagetable, oldsz_up, npages, 0);
+  //     printf("mmap mappages error\n");
+  //     return -1;
+  //   }
+  // }

@@ -5,6 +5,7 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "fcntl.h"
 
 struct cpu cpus[NCPU];
 
@@ -296,6 +297,26 @@ fork(void)
       np->ofile[i] = filedup(p->ofile[i]);
   np->cwd = idup(p->cwd);
 
+  for (uint i = 0; i < 16; i ++) {
+    if (p->vma[i].v) {
+      uint64 a;
+      for(a = p->vma[i].addr; a < p->vma[i].addr + p->vma[i].length; a += PGSIZE) {
+        uint64 perm = p->vma[i].perm & ~PTE_U;
+        if(mappages(np->pagetable, a, PGSIZE, 0, perm) != 0){
+          panic("\nfork mappages\n");
+        }
+      }
+      np->vma[i].v = 1;
+      np->vma[i].addr = p->vma[i].addr;
+      np->vma[i].length = p->vma[i].length;
+      np->vma[i].perm = p->vma[i].perm;
+      np->vma[i].flags = p->vma[i].flags;
+      np->vma[i].f = p->vma[i].f;
+      filedup(np->vma[i].f);
+      np->vma[i].offset = p->vma[i].offset;
+    }
+  }
+
   safestrcpy(np->name, p->name, sizeof(p->name));
 
   pid = np->pid;
@@ -350,6 +371,14 @@ exit(int status)
       struct file *f = p->ofile[fd];
       fileclose(f);
       p->ofile[fd] = 0;
+    }
+  }
+
+  struct vma *vma1;
+  for (vma1 = p->vma; vma1 - p->vma < 16; vma1++) {
+    if (vma1->v) {
+      if (release_vma(vma1, vma1->addr, vma1->length, p->pagetable) < 0)
+        panic("release_vma\n");
     }
   }
 
